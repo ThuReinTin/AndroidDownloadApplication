@@ -1,6 +1,5 @@
 package tin.thurein.androiddownloadapplication
 
-import android.app.Activity.RESULT_OK
 import android.app.IntentService
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -11,24 +10,23 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 
-import java.io.FileOutputStream
-import java.io.IOException
-import java.io.InputStream
-import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.IntentFilter
-import java.time.temporal.TemporalAccessor
+import java.io.*
 import java.util.*
 
-class DownloadIntentService(private val name: String) : IntentService(name) {
+const val CANCEL_ACTION = "tin.thurein.download.cancel"
+var isCancelled = false
+
+class DownloadIntentService(name: String) : IntentService(name) {
 
     private val TAG = "Download Service"
 
-    constructor () : this("hello") {
+    constructor () : this("Donwload service") {
     }
 
     private lateinit var builder: NotificationCompat.Builder
@@ -38,27 +36,23 @@ class DownloadIntentService(private val name: String) : IntentService(name) {
     private val notificationId: Int = 1
     private val channelId = "channel_download"
 
-    companion object {
-        val CANCEL_ACTION = "tin.thurein.download.cancel"
-        var isCancelled = false
-    }
-
-
     val PROGRESS_MAX = 100
 
     override fun onCreate() {
         super.onCreate()
-        downloadReceiver = DonwloadBroadcastReceiver()
+
+        registerReceiver()
+
         builder = NotificationCompat.Builder(baseContext, channelId).apply {
             setContentTitle("File download")
             setContentText("Downloading")
             setSmallIcon(R.drawable.download)
-            setPriority(NotificationCompat.PRIORITY_LOW)
+            priority = (NotificationCompat.PRIORITY_LOW)
 
             val cancelIntent = Intent(baseContext, DonwloadBroadcastReceiver::class.java).apply {
                 action = CANCEL_ACTION
             }
-            val cancelPendingIntent = PendingIntent.getBroadcast(baseContext, 0, cancelIntent, PendingIntent.FLAG_UPDATE_CURRENT)
+            val cancelPendingIntent = PendingIntent.getBroadcast(baseContext, 0, cancelIntent, PendingIntent.FLAG_CANCEL_CURRENT)
             addAction(R.drawable.cancel, "Cancel", cancelPendingIntent)
         }
 
@@ -70,21 +64,13 @@ class DownloadIntentService(private val name: String) : IntentService(name) {
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val channel = NotificationChannel(
-                    channelId,
-                    "Channel human readable title",
+                    channelId, "Downloading File",
                     NotificationManager.IMPORTANCE_LOW
                 )
                 createNotificationChannel(channel)
                 builder.setChannelId(channelId)
             }
         }
-    }
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val intentFilter = IntentFilter()
-        intentFilter.addAction(CANCEL_ACTION)
-        registerReceiver(downloadReceiver, intentFilter)
-        return super.onStartCommand(intent, flags, startId)
     }
 
     override fun onHandleIntent(intent: Intent?) {
@@ -101,12 +87,15 @@ class DownloadIntentService(private val name: String) : IntentService(name) {
     private fun updateNotification(currentProgress: Int, maxProgress: Int, indeterminate: Boolean, msg: String) {
         builder.apply {
             setProgress(maxProgress, currentProgress, indeterminate)
-            if (maxProgress != -1 && currentProgress >= maxProgress) {
+            if (maxProgress != -1 && currentProgress == maxProgress) {
                 setContentText(msg)
-                setProgress(0, 0, indeterminate)
                 mActions.clear()
+                setOngoing(false)
+            } else {
+                setOngoing(true)
             }
         }
+
         notificationManager.notify(notificationId, builder.build())
     }
 
@@ -114,6 +103,7 @@ class DownloadIntentService(private val name: String) : IntentService(name) {
         var input: InputStream? = null
         var output: OutputStream? = null
         var connection: HttpURLConnection? = null
+        var file : File? = null
         try {
             val url = URL(urlString)
             connection = url.openConnection() as HttpURLConnection
@@ -121,13 +111,13 @@ class DownloadIntentService(private val name: String) : IntentService(name) {
             // expect HTTP 200 OK, so we don't mistakenly save error report
             // instead of the file
             var fileLength : Int
-            var fileName : String = ""
+            var fileName = ""
             var extension = ""
             connection.apply {
                 connect()
                 if (responseCode != HttpURLConnection.HTTP_OK) {
                     Log.e(TAG, responseMessage)
-                    updateNotification(101, 100, false, "Invalid download link.")
+                    updateNotification(0, 0, false, "Invalid download link.")
                     return
                 }
                 fileLength = contentLength
@@ -135,15 +125,14 @@ class DownloadIntentService(private val name: String) : IntentService(name) {
 
                 val disposition = getHeaderField("Content-Disposition")
                 val contentType = getContentType()
-                val contentLength = getContentLength()
 
                 if (disposition != null) {
                     // extracts file name from header field
-                    val index = disposition!!.indexOf("filename=")
+                    val index = disposition.indexOf("filename=")
                     if (index > 0) {
-                        fileName = disposition!!.substring(
+                        fileName = disposition.substring(
                             index + 10,
-                            disposition!!.length - 1
+                            disposition.length - 1
                         )
                     }
                 } else {
@@ -155,22 +144,25 @@ class DownloadIntentService(private val name: String) : IntentService(name) {
                 extension = contentType.split("/")[1]
             }
 
-            output = FileOutputStream("/sdcard/$fileName.$extension")
+            file = File("/sdcard/$fileName.$extension")
+            output = FileOutputStream(file, false)
 
             val data = ByteArray(4096)
             var total: Long = 0
             var count: Int = -1
 
             input?.apply { count = read(data) }
+            var cancel = false;
             while (count != -1) {
                 // allow canceling with back button
                 if (isCancelled) {
-                    input?.apply {
-                        updateNotification(101, 100, false, "Download cancelled")
-                        close()
+                    input.apply {
                         isCancelled = false
+                        cancel = true
+                        file.delete()
                     }
-                    return
+                    notificationManager.cancel(notificationId)
+                    break;
                 }
                 total += count.toLong()
                 // publishing the progress....
@@ -184,30 +176,40 @@ class DownloadIntentService(private val name: String) : IntentService(name) {
                 input?.apply { count = read(data) }
             }
 
-            updateNotification((total + 1).toInt(), total.toInt(), false, "Download complete!")
+            notificationManager.cancel(notificationId)
+            updateNotification(0, 0, false, if (cancel) "Download cancelled" else "Download complete!")
+
         } catch (e: Exception) {
             Log.e(TAG, e.toString())
-            updateNotification(101, 100, false, "Invalid download link.")
-            return
+            file?.apply {
+                delete()
+            }
+            notificationManager.cancel(notificationId)
+            updateNotification(0, 0, false, "Invalid download link.")
         } finally {
             try {
                 output?.apply { close() }
                 input?.apply { close() }
             } catch (ignored: IOException) {
                 Log.e(TAG, ignored.toString())
-                updateNotification(101, 100, false, "Invalid download link.")
+                updateNotification(0, 0, false, "Invalid download link.")
             }
 
             connection?.apply { disconnect() }
         }
-        return
     }
 
-    class DonwloadBroadcastReceiver() : BroadcastReceiver() {
+    private fun registerReceiver() {
+        downloadReceiver = DonwloadBroadcastReceiver()
+        val intentFilter = IntentFilter()
+        intentFilter.addAction(CANCEL_ACTION)
+        registerReceiver(downloadReceiver, intentFilter)
+    }
 
+    class DonwloadBroadcastReceiver(): BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             intent?.apply {
-                if (action.equals(CANCEL_ACTION)) {
+                if (action!!.equals(CANCEL_ACTION)) {
                     isCancelled = true
                 }
             }
