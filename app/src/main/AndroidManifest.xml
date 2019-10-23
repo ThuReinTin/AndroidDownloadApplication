@@ -25,10 +25,11 @@
             android:name=".DownloadIntentService"
             android:exported="false" />
 
-        <receiver android:name=".DownloadIntentService$DonwloadBroadcastReceiver"
+        <receiver
+            android:name=".DownloadIntentService$DonwloadBroadcastReceiver"
             android:exported="false">
             <intent-filter>
-                <action android:name="tin.thurein.download.cancel"/>
+                <action android:name="tin.thurein.download.cancel" />
             </intent-filter>
         </receiver>
     </application>
